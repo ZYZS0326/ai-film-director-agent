@@ -1,0 +1,113 @@
+{
+  "name": "ai-film-director-agent",
+  "productName": "AI 电影导演工作站",
+  "version": "1.4.2",
+  "engines": {
+    "node": ">=22.14.0"
+  },
+  "private": true,
+  "description": "AI Film Director Agent — 从一句想法到完整成片生产方案的 AI 电影导演智能体",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k -n SERVER,WEB -c green,cyan \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "node server/index.js",
+    "dev:web": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "electron:dev": "cross-env ELECTRON_START_URL=http://localhost:5173 electron .",
+    "electron:start": "npm run build && electron .",
+    "electron:build": "node scripts/build-desktop.js",
+    "electron:build:dir": "node scripts/build-desktop.js --dir",
+    "clean:build": "node scripts/build-desktop.js --clean-only",
+    "test:ui": "node scripts/ui-smoke.cjs",
+    "test:agent": "node scripts/agent-smoke.cjs",
+    "test:llm": "node scripts/llm-smoke.cjs",
+    "test:llm:hostile": "node scripts/llm-hostile.cjs",
+    "test:budget": "node scripts/prompt-budget.cjs",
+    "test:continuation": "node scripts/llm-continuation.cjs",
+    "test:parser": "node scripts/parser-smoke.cjs",
+    "test:wiring": "node scripts/pipeline-wiring.cjs",
+    "test:session": "node scripts/session-robustness.cjs",
+    "test:stop": "node scripts/stop-signal.cjs",
+    "test:knowledge": "node scripts/knowledge-integrity.cjs",
+    "test:inputs": "node scripts/input-robustness.cjs",
+    "test:production": "node scripts/production-checks.cjs && node scripts/production-api.cjs",
+    "test:editor": "node scripts/shot-editor-test.cjs",
+    "icon": "node scripts/make-icon.js",
+    "test:all": "node scripts/test-all.cjs",
+    "test": "npm run test:all",
+    "typecheck": "tsc --noEmit",
+    "test:security": "node scripts/security-smoke.cjs",
+    "test:references": "node scripts/references-smoke.cjs",
+    "test:staged": "node scripts/staged-workflow.cjs"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dompurify": "^3.2.4",
+    "express": "^4.21.2",
+    "marked": "^15.0.6",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.5",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "electron": "^44.4.3",
+    "electron-builder": "^26.15.3",
+    "jsdom": "^26.1.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7"
+  },
+  "build": {
+    "appId": "com.aigc.film-director",
+    "productName": "AI电影导演工作站",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "server/**/*",
+      "!server/data{,/**/*}",
+      "package.json"
+    ],
+    "extraMetadata": {
+      "main": "electron/main.js"
+    },
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-${env.BUILD_STAMP}-${arch}.${ext}"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-${env.BUILD_STAMP}-portable.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "AI电影导演工作站"
+    }
+  }
+}

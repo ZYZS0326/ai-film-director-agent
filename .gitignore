@@ -1,0 +1,38 @@
+node_modules/
+dist/
+release/
+release2/
+server/data/settings.json
+server/data/sessions/
+.tmp*/
+.env
+*.log
+.DS_Store
+
+# electron-builder 的临时输出目录。每次构建留一个，且里面的 app.asar
+# 会被系统级句柄锁住（重启前删不掉），必须忽略。
+# 仅在确认不再需要后手动清理指定目录；构建不会自动删除历史版本。
+buildout-*/
+out-*/
+
+# Local history, credentials and generated release packages must not be published.
+release-*/
+.workbuddy-ai/
+.codex/
+.agents/
+.npm-cache/
+.env.*
+!.env.example
+server/data/
+build/ui-preview/
+build/test-reports/
+publish-source/
+HANDOVER.md
+*.exe
+*.asar
+*.blockmap
+*.pem
+*.key
+*.pfx
+*.p12
+coverage/
