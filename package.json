@@ -1,7 +1,7 @@
 {
   "name": "ai-film-director-agent",
   "productName": "AI 电影导演工作站",
-  "version": "1.4.2",
+  "version": "1.4.5",
   "engines": {
     "node": ">=22.14.0"
   },
@@ -22,6 +22,10 @@
     "test:ui": "node scripts/ui-smoke.cjs",
     "test:agent": "node scripts/agent-smoke.cjs",
     "test:llm": "node scripts/llm-smoke.cjs",
+    "test:providers": "node scripts/provider-regression.cjs",
+    "test:ark": "node scripts/ark-budget.cjs",
+    "test:ark:live": "node scripts/ark-live-smoke.cjs",
+    "test:settings": "electron scripts/settings-render.cjs",
     "test:llm:hostile": "node scripts/llm-hostile.cjs",
     "test:budget": "node scripts/prompt-budget.cjs",
     "test:continuation": "node scripts/llm-continuation.cjs",

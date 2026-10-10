@@ -43,7 +43,7 @@ async function reviewStage(skill, text, { failed = false, parsed = null, session
     const answer = await llm.chat([
       { role: 'system', content: '你是独立的环节审核员。只审核当前环节，不重写内容。仅报告有直接文本证据的实质问题；允许零问题。输出严格 JSON：{"issues":[{"evidence":"原文中的短句","suggestion":"具体修改动作"}]}。最多3项。不引用原文就不要报告。' },
       { role: 'user', content: `环节：${skill.name}\n原文：\n${String(text).slice(0, 6000)}` },
-    ], { temperature: 0.1, maxTokens: 600, maxContinuations: 0 })
+    ], { role: 'reviewer', structured: true, temperature: 0.1, desiredOutputTokens: 600, maxContinuations: 0 })
     const match = String(answer).match(/\{[\s\S]*\}/)
     const data = match ? JSON.parse(match[0]) : null
     if (!data || !Array.isArray(data.issues)) throw new Error('审核格式无效')

@@ -75,9 +75,9 @@ function check(name, ok, extra = '') {
   check('产出内容非空', Object.values(s.outputs).every((v) => String(v).length > 20))
 
   console.log('[5] 结构化解析（LLM 输出的 JSON 块）…')
-  check('分镜解析为结构化 Shot List', s.shots.length === 3, `${s.shots.length} 个`)
+  check('分镜完整覆盖目标时长', s.shots.length > 3 && Math.abs(s.shots.at(-1).end - s.constraints.duration) < 0.05, `${s.shots.length} 个`)
   check('分镜字段含材质', !!s.shots[0].material, s.shots[0].material)
-  check('提示词解析为结构化数据', !!s.promptData && s.promptData.shots.length === 3)
+  check('提示词完整对应全部镜头', !!s.promptData && s.promptData.shots.length === s.shots.length)
   check('角色一致性中英双版', !!(s.promptData?.characterLock?.zh && s.promptData?.characterLock?.en))
   check('提示词 13 要素覆盖 13/13', s.promptValidation?.covered === 13, `${s.promptValidation?.covered}/${s.promptValidation?.total}`)
   check('提示词零无效词', (s.promptValidation?.banned || []).length === 0, JSON.stringify(s.promptValidation?.banned))

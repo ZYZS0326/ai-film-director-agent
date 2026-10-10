@@ -22,9 +22,10 @@ const SETTINGS = {
   baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat',
   temperature: 0.8, maxTokens: 8192, presetId: 'deepseek', theme: 'dark',
   hasKey: false, keyMask: '', mode: 'demo',
+  provider: 'deepseek', roleModels: {}, providerConfigs: {}, roles: [{ id: 'planner', name: '任务规划' }, { id: 'reviewer', name: '环节审核' }],
   presets: [
     { id: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', note: '中文强' },
-    { id: 'volcengine', name: '火山方舟 / 豆包', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', model: 'doubao-seed-2-1-pro-260628', note: '替换 Model ID' },
+    { id: 'ark', name: '火山方舟 / 豆包', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', model: 'doubao-seed-2-1-pro-260628', note: '替换 Model ID', models: [{ id: 'doubao-seed-2-1-pro-260628' }, { id: 'doubao-seed-2-0-lite-260428' }] },
   ],
 }
 
@@ -430,6 +431,13 @@ function makeFetch() {
     check('设置弹窗渲染服务商预设', h5.includes('modal') && h5.includes('DeepSeek'))
     check('设置弹窗提供 API 接入教程', h5.includes('API 配置教程') && h5.includes('火山方舟') && h5.includes('不要手动追加'))
     check('设置弹窗提示演示模式', h5.includes('演示模式') && h5.includes('API Key'))
+    const ark = Array.from(root.querySelectorAll('.preset-card')).find(x => x.textContent.includes('火山'))
+    ark.dispatchEvent(new window.MouseEvent('click', { bubbles: true }))
+    await new Promise(r => setTimeout(r, 100))
+    check('Ark 预设设置默认模型和地址', root.querySelector('#api-base-url').value.includes('ark.cn-beijing') && root.querySelector('#api-model').value === 'doubao-seed-2-1-pro-260628')
+    check('模型目录呈现且允许自定义 ID', root.querySelector('#api-model').getAttribute('list') === 'model-options' && root.querySelectorAll('#model-options option').length === 2 && !root.querySelector('#api-model').hasAttribute('pattern'))
+    check('角色覆盖仅使用现有角色并有可访问标签', !!root.querySelector('label[for="role-planner"]') && !!root.querySelector('#role-reviewer') && !!root.querySelector('select[aria-label="任务规划服务商"]'))
+    check('备用模型可编辑且说明不因质量切换', !!root.querySelector('#fallback-models') && root.querySelector('#fallback-help').textContent.includes('不会因内容质量'))
   }
 
   // ── 重开已保存项目：对话流必须完整且用真实环节名 ──

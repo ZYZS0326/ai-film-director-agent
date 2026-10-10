@@ -7,12 +7,13 @@
  * 容错策略：
  *   1. 超时控制（AbortController），避免长请求挂死
  *   2. 流式失败自动降级为非流式
- *   3. 参数不被接受（400）时逐步降级参数重试
+ *   3. 统一模型能力与输入/输出预算；明确上限或参数错误只自校正一次
  *   4. 容忍各家 SSE 差异（data: 前缀、[DONE]、心跳注释行、reasoning_content）
  *   5. **输出被截断（finish_reason === 'length'）时自动续写** —— 这是「每个环节都只生成一半」
  *      的根因：契约要求完整正文，而模型单次输出有上限。只报警告是不够的，必须自动补完。
  */
-const { loadSettings } = require('../config')
+const { loadSettings, resolveModel, isLocalOllama, sameService } = require('../config')
+const policy = require('./model-policy')
 
 const DEFAULT_TIMEOUT = 180000 // 3 分钟
 
@@ -28,7 +29,7 @@ const MIN_USEFUL_CHUNK = 40
  * 拼接总量的硬上限。
  * 有些网关会恒定回报 finish_reason='length'，若不设上限会白跑 8 轮。
  */
-const MAX_TOTAL_CHARS = 32000
+const MAX_TOTAL_CHARS = 256000
 
 /** 续写指令：必须让模型「原样接上」，而不是重开一遍 */
 const CONTINUE_PROMPT =
@@ -41,7 +42,7 @@ const CONTINUE_PROMPT =
 
 function isConfigured() {
   const s = loadSettings()
-  return Boolean(s.apiKey && s.baseUrl && s.model)
+  return Boolean((s.apiKey || isLocalOllama(s.baseUrl)) && s.baseUrl && s.model)
 }
 
 /**
@@ -49,39 +50,35 @@ function isConfigured() {
  * 若模型上下文窗口较小（用户在设置里指定），把输出预算也压下来 ——
  * 否则「输入 + 输出」必然超出窗口，每个环节都会报上下文超长。
  */
-function effectiveMaxTokens(opts = {}) {
-  const s = loadSettings()
-  const win = Number(s.contextWindow) || 0
-  const want = Number(opts.maxTokens ?? s.maxTokens) || 8192
-  if (!win) return want
-  return Math.max(1024, Math.min(want, Math.floor(win * 0.45)))
-}
 
 function buildUrl(baseUrl) {
-  const b = String(baseUrl || '').replace(/\/+$/, '')
+  const b = String(baseUrl || '').trim().replace(/\/+$/, '')
   if (b.endsWith('/chat/completions')) return b
   return b + '/chat/completions'
 }
 
 function headersOf(s, apiKey) {
+  const key = String(apiKey ?? s.apiKey ?? '').trim()
   return {
     'Content-Type': 'application/json',
-    Authorization: `Bearer ${apiKey || s.apiKey}`,
+    ...(key ? { Authorization: `Bearer ${key}` } : {}),
   }
 }
 
+/** Apply only documented options for known default models on official endpoints. */
+
 /** 读取错误响应体，转成人类可读文本 */
-async function errorText(res) {
+async function errorText(res, keys = []) {
   let t = ''
   try { t = await res.text() } catch { /* ignore */ }
   t = String(t || '').trim()
   // 尝试提取 JSON 里的 message
   try {
     const j = JSON.parse(t)
-    if (j.error?.message) return String(j.error.message).slice(0, 300)
-    if (j.message) return String(j.message).slice(0, 300)
+    if (j.error?.message) return policy.redact(`${j.error.code || ''}: ${String(j.error.message)}`, keys).slice(0, 700)
+    if (j.message) return policy.redact(String(j.message), keys).slice(0, 700)
   } catch { /* 非 JSON，原样返回 */ }
-  return t.slice(0, 300) || `HTTP ${res.status}`
+  return policy.redact(t || '服务商未提供错误详情', keys).slice(0, 700)
 }
 
 /**
@@ -119,7 +116,7 @@ function isTransient(text) {
 
 /** 上下文超长类错误 —— 重试无用，必须缩小提示词 */
 function isContextOverflow(text) {
-  return /context[_ ]?length|maximum context|too long|过长|超出.*(长度|限制)|reduce the length|token limit|context window|max_tokens is too large/i.test(String(text || ''))
+  return policy.classify(0, text) === 'CONTEXT_LIMIT'
 }
 
 /** 带退避重试执行：避免偶发网络抖动毁掉一整个环节 */
@@ -137,7 +134,7 @@ async function withRetry(fn, { retries = 3, baseDelay = 1500, shouldRetry } = {}
   }
   const cause = rootCause(lastErr)
   const human = humanizeNetwork(cause)
-  throw new Error(human ? `${human}（${cause}）` : String((lastErr && lastErr.message) || lastErr))
+  throw policy.modelError(lastErr?.status || 0, human ? `${human}（${cause}）` : String((lastErr && lastErr.message) || lastErr))
 }
 
 /**
@@ -151,14 +148,17 @@ async function withRetry(fn, { retries = 3, baseDelay = 1500, shouldRetry } = {}
  * 所以这里把定时器与 abort 一起交给调用方，**读完 body 再 release()**。
  * 返回值：`{ res, release, abort, timeout }`。
  */
-async function fetchWithTimeout(url, init, timeout) {
+async function fetchWithTimeout(url, init, timeout, firstContentMs = 0) {
   const ac = new AbortController()
   const timer = setTimeout(() => ac.abort(), timeout)
+  const firstTimer = firstContentMs ? setTimeout(() => ac.abort(), firstContentMs) : null
+  const markContent = () => { if (firstTimer) clearTimeout(firstTimer) }
+  const release = () => { clearTimeout(timer); markContent() }
   let handed = false
   try {
     const res = await fetch(url, { ...init, signal: ac.signal })
     handed = true
-    return { res, release: () => clearTimeout(timer), abort: () => ac.abort(), signal: ac.signal, timeout }
+    return { res, release, markContent, abort: () => ac.abort(), signal: ac.signal, timeout }
   } catch (e) {
     if (e.name === 'AbortError') {
       throw new Error(`请求超时（${Math.round(timeout / 1000)} 秒）。可能是模型响应慢或网络不通，可尝试换用更快的模型。`)
@@ -174,7 +174,7 @@ async function fetchWithTimeout(url, init, timeout) {
     }
     throw new Error(String(e.message || e))
   } finally {
-    if (!handed) clearTimeout(timer)
+    if (!handed) release()
   }
 }
 
@@ -212,68 +212,48 @@ function readWithIdle(reader, idleMs, abort) {
 }
 
 /** 构造参数降级序列：max_tokens 过大是各家最常见的 400 */
-function paramVariants(base, messages) {
-  const mt = Number(base.max_tokens) || 0
-  const list = [{ ...base, stream: false }]
-  // 依次下调输出上限，覆盖「服务商/模型上限小于用户设置」的情况（最常见的 400）
-  const seen = new Set([mt])
-  for (const cap of [8192, 4096, 2048, 1024]) {
-    if (mt > cap && !seen.has(cap)) { seen.add(cap); list.push({ ...base, stream: false, max_tokens: cap }) }
+async function requestRaw(messages, onDelta, opts = {}) {
+  let attemptOpts = opts
+  for (let correction = 0; correction < 2; correction++) {
+    const request = policy.payload(messages, attemptOpts)
+    const { s, body, budget } = request
+    const timeout = opts.timeout || DEFAULT_TIMEOUT
+    let transport
+    try {
+      opts.onRequestBudget?.({ model: s.model, provider: s.provider, ...budget })
+      transport = await fetchWithTimeout(buildUrl(s.baseUrl), {
+        method: 'POST', headers: headersOf(s), body: JSON.stringify(body),
+      }, timeout, opts.firstContentTimeout || 0)
+      const { res, signal, abort, markContent } = transport
+      if (!res.ok) throw policy.modelError(res.status, await errorText(res, [s.apiKey]), [s.apiKey])
+      if (body.stream) return await consumeStream(res, messages, onDelta, { ...attemptOpts, apiKey: s.apiKey }, abort, markContent)
+      let json
+      try { json = await res.json() } catch {
+        if (signal.aborted) throw policy.modelError(0, `请求超时（${Math.round(timeout / 1000)} 秒）：已连接但未返回正文`)
+        throw policy.modelError(0, 'LLM 返回的不是合法 JSON，请检查 Base URL 是否为 OpenAI 兼容接口。')
+      }
+      const choice = json.choices?.[0] || {}
+      const text = String(choice.message?.content ?? json.content ?? json.text ?? '')
+      if (opts.streaming && onDelta) onDelta(text)
+      opts.onUsage?.(json.usage || null)
+      return { text, truncated: choice.finish_reason === 'length', generation_truncated: choice.finish_reason === 'length', usage: json.usage || null, effectiveOutputTokens: budget.effective }
+    } catch (raw) {
+      const error = policy.modelError(raw.status || 0, raw.message || String(raw), [s.apiKey])
+      // Exactly one corrective attempt; neither authentication nor throttling enters here.
+      const streamUnsupported = body.stream && ([405, 415, 501].includes(error.status) || error.category === 'INVALID_PARAMETER' && /stream|sse/i.test(error.message))
+      const corrected = correction === 0 ? streamUnsupported ? { ...attemptOpts, streaming: false } : policy.correctedOptions(error, request, attemptOpts) : null
+      if (!corrected) throw error
+      opts.onBudgetCorrection?.({ category: error.category, model: s.model, from: budget.effective, to: corrected.outputCap ?? budget.effective })
+      attemptOpts = corrected
+    } finally { transport?.release() }
   }
-  list.push({ model: base.model, messages, stream: false }) // 最后裸请求：去掉温度与 max_tokens
-  return list
 }
 
 /**
  * 非流式对话（单次）—— 返回 { text, truncated }
  */
 async function chatOnceRaw(messages, opts = {}) {
-  const s = loadSettings()
-  const timeout = opts.timeout || DEFAULT_TIMEOUT
-  const base = {
-    model: opts.model || s.model,
-    messages,
-    temperature: opts.temperature ?? s.temperature,
-    max_tokens: effectiveMaxTokens(opts),
-  }
-
-  const variants = paramVariants(base, messages)
-  let lastErr = ''
-  for (let i = 0; i < variants.length; i++) {
-    const { res, release, signal } = await fetchWithTimeout(buildUrl(opts.baseUrl || s.baseUrl), {
-      method: 'POST',
-      headers: headersOf(s, opts.apiKey),
-      body: JSON.stringify(variants[i]),
-    }, timeout)
-    // release() 必须在**读完 body 之后**调用 —— 否则超时窗口只覆盖到响应头，
-    // 服务商发完头就挂住时 res.json() 会永久挂起。
-    try {
-      if (res.ok) {
-        let json = null
-        try {
-          json = await res.json()
-        } catch (e) {
-          // 区分两种失败：body 读取被超时中止（网络/模型太慢），还是真的返回了非 JSON。
-          // 混为一谈会把用户引去检查 Base URL —— 而 Base URL 根本没写错。
-          if (signal.aborted) {
-            throw new Error(`请求超时（${Math.round(timeout / 1000)} 秒）：已建立连接，但模型迟迟没有返回内容。可换用更快的模型，或检查网络与代理。`)
-          }
-          throw new Error('LLM 返回的不是合法 JSON，请检查 Base URL 是否为 OpenAI 兼容接口。')
-        }
-        const ch0 = json?.choices?.[0] || {}
-        const body = ch0.message?.content || ch0.message?.reasoning_content || json?.content || json?.text
-        // finish_reason === 'length'：输出被 max_tokens 截断。
-        // 标题在前、正文在后，于是就会出现「只有章节标题、正文为空」的现象。
-        return { text: String(body || ''), truncated: ch0.finish_reason === 'length' }
-      }
-      lastErr = await errorText(res)
-    } finally {
-      release()
-    }
-    // 非参数类错误直接抛出，不再降级重试
-    if (!/400|404|413|422/.test(String(res.status))) break
-  }
-  throw new Error(`LLM ${lastErr}`)
+  return requestRaw(messages, null, { ...opts, streaming: false })
 }
 
 /**
@@ -281,33 +261,7 @@ async function chatOnceRaw(messages, opts = {}) {
  * 失败时自动降级为非流式（很多服务/网关不支持 SSE）
  */
 async function chatStreamRaw(messages, onDelta, opts = {}) {
-  const s = loadSettings()
-  const timeout = opts.timeout || DEFAULT_TIMEOUT
-  const url = buildUrl(opts.baseUrl || s.baseUrl)
-
-  const { res, release, abort } = await fetchWithTimeout(url, {
-    method: 'POST',
-    headers: headersOf(s, opts.apiKey),
-    body: JSON.stringify({
-      model: opts.model || s.model,
-      messages,
-      temperature: opts.temperature ?? s.temperature,
-      max_tokens: effectiveMaxTokens(opts),
-      stream: true,
-    }),
-  }, timeout)
-
-  // release() 必须覆盖到「body 读完」为止，不能只覆盖响应头。
-  //
-  // 注意这里的超时语义：它现在是**整个流的总时长上限**（默认 180 秒）。
-  // 超时触发时不会丢内容 —— 读取中断被 consumeStream 接住，
-  // 已有分片会带着 truncated=true 返回，再由 runWithContinuation 续写补齐。
-  // 「流挂死」由 readWithIdle 的空闲守卫负责，两者分工不同，别把总时长上限删掉。
-  try {
-    return await consumeStream(res, messages, onDelta, opts, abort)
-  } finally {
-    release()
-  }
+  return requestRaw(messages, onDelta, { ...opts, streaming: true })
 }
 
 /**
@@ -315,11 +269,12 @@ async function chatStreamRaw(messages, onDelta, opts = {}) {
  * 独立成函数是为了能用 try/finally 包住整段读取逻辑（release() 必须覆盖到 body 读完），
  * 同时不必把原逻辑整体缩进一层。
  */
-async function consumeStream(res, messages, onDelta, opts, abort) {
+async function consumeStream(res, messages, onDelta, opts, abort, markContent) {
   const idleMs = opts.idleTimeout || STREAM_IDLE_TIMEOUT
 
   if (!res.ok) {
     const t = await errorText(res)
+    if (opts.failoverAttempt && [403, 404, 429, 500, 502, 503, 504].includes(res.status)) throw new Error(`LLM ${t}`)
     // 流式被拒绝或不支持 → 降级非流式
     if (/400|404|405|415|501/.test(String(res.status))) {
       const r = await chatOnceRaw(messages, opts)
@@ -327,6 +282,19 @@ async function consumeStream(res, messages, onDelta, opts, abort) {
       return r
     }
     throw new Error(`LLM ${t}`)
+  }
+
+  // Some compatible gateways ignore stream:true and return ordinary JSON.
+  // Consume that response directly instead of restarting it on every model.
+  if ((res.headers.get('content-type') || '').includes('application/json')) {
+    const json = await res.json()
+    const choice = json.choices?.[0] || {}
+    const text = String(choice.message?.content || '')
+    if (!text.trim()) throw new Error('模型返回空正文')
+    markContent && markContent()
+    onDelta && onDelta(text)
+    opts.onUsage?.(json.usage || null)
+    return { text, truncated: choice.finish_reason === 'length', generation_truncated: choice.finish_reason === 'length', usage: json.usage || null }
   }
 
   if (!res.body) {
@@ -367,11 +335,12 @@ async function consumeStream(res, messages, onDelta, opts, abort) {
         if (!data || data === '[DONE]') continue
         try {
           const json = JSON.parse(data)
+          if (json.usage) opts.onUsage?.(json.usage)
           const ch = json.choices?.[0] || {}
           if (ch.finish_reason === 'length') truncated = true
           // 兼容各家字段；推理模型还会把思考过程放在 reasoning_content（不作为正文）
           const delta = ch.delta?.content ?? ch.text ?? json.content ?? ch.message?.content
-          if (delta) { full += delta; sawAny = true; onDelta && onDelta(String(delta)) }
+          if (delta) { markContent && markContent(); full += delta; sawAny = true; onDelta && onDelta(String(delta)) }
         } catch { /* 忽略不完整分片 */ }
       }
     }
@@ -379,7 +348,8 @@ async function consumeStream(res, messages, onDelta, opts, abort) {
     // 读取中断（网络抖动，或空闲守卫判定流已挂死）。
     // 无论哪种，只要已经拿到部分内容就保留它 —— 丢掉的只是尾部，而不是整个环节。
     try { await reader.cancel() } catch { /* 已经 abort 过，忽略 */ }
-    if (full) return { text: full, truncated: true }
+    if (full) return { text: full, truncated: true, generation_truncated: true }
+    if (opts.failoverAttempt) throw new Error(`模型未返回正文，流式请求中断或超时：${e.message}`)
     // 一点内容都没有 → 降级为非流式重来（有些网关对 SSE 支持不好，非流式反而正常）
     const r = await chatOnceRaw(messages, opts)
     onDelta && onDelta(r.text)
@@ -387,13 +357,14 @@ async function consumeStream(res, messages, onDelta, opts, abort) {
   }
 
   if (!sawAny) {
+    if (opts.failoverAttempt) throw new Error('模型返回空正文，尝试备用模型')
     // 流里没有任何内容（网关缓冲 / 空响应，或只有 reasoning_content）→ 降级非流式
     const r = await chatOnceRaw(messages, opts)
     onDelta && onDelta(r.text)
     return r
   }
 
-  return { text: full, truncated }
+  return { text: full, truncated, generation_truncated: truncated }
 }
 
 /**
@@ -436,7 +407,15 @@ async function runWithContinuation(convo, callOnce, onDelta, opts = {}) {
       if (full) { truncated = true; break }
       throw e
     }
-    full += r.text || ''
+    let chunk = r.text || ''
+    // Remove only an exact substantial overlap; never discard a short legitimate repeated phrase.
+    if (cont && full && chunk) {
+      for (let n = Math.min(full.length, chunk.length, 4000); n >= 80; n--) {
+        if (full.endsWith(chunk.slice(0, n))) { chunk = chunk.slice(n); break }
+      }
+    }
+    if (cont && !chunk.trim()) { truncated = true; break }
+    full += chunk
     truncated = r.truncated
 
     // 没有内容、没报截断、续写轮次用尽、或总量已足够长 → 结束
@@ -447,8 +426,9 @@ async function runWithContinuation(convo, callOnce, onDelta, opts = {}) {
 
     cont += 1
     messages = [
-      ...messages,
-      { role: 'assistant', content: r.text },
+      ...convo,
+      // Keep original contracts/hard facts, but avoid resending every previous long reply.
+      { role: 'assistant', content: full.slice(-6000) },
       { role: 'user', content: CONTINUE_PROMPT },
     ]
     // 让界面知道「还在写」而不是卡住了
@@ -459,15 +439,71 @@ async function runWithContinuation(convo, callOnce, onDelta, opts = {}) {
   return { text: full, truncated, continuations: cont }
 }
 
+const modelCooldowns = new Map()
+
+/** A model pool shares only the selected origin and its key; explicit test overrides stay single-model. */
+async function routeRequest(fn, opts = {}, canSwitch = () => true) {
+  const s = resolveModel(opts)
+  const explicit = ['baseUrl', 'model', 'apiKey'].some(k => Object.hasOwn(opts, k))
+  const models = explicit || opts.failover === false ? [s.model] : [...new Set([s.model, ...s.fallbackModels])]
+  const retryable = e => canSwitch() && ['RATE_LIMIT', 'TIMEOUT', 'NETWORK', 'MODEL_NOT_AVAILABLE'].includes(e.category || policy.classify(e.status || 0, e.message))
+  if (models.length === 1) return withRetry(() => fn(opts), { shouldRetry: retryable })
+  const keyId = require('crypto').createHash('sha256').update(s.apiKey).digest('hex').slice(0, 16)
+  const poolId = `${s.baseUrl}|${keyId}|${models.join(',')}`
+  const cooling = m => (modelCooldowns.get(`${poolId}|${m}`) || 0) > Date.now()
+  const candidates = [...models.filter(m => !cooling(m)), ...models.filter(cooling)]
+  const failures = []
+  for (const model of candidates) {
+    try {
+      const requestOpts = { ...opts, provider: s.provider, baseUrl: s.baseUrl, apiKey: s.apiKey, model,
+        timeout: opts.timeout || (opts.streaming ? DEFAULT_TIMEOUT : 60000),
+        // Non-streaming returns the whole batch at once, not an early first token.
+        // Applying the streaming 45s gate here prematurely kills valid long JSON.
+        firstContentTimeout: opts.firstContentTimeout ?? (opts.streaming ? 45000 : 0),
+        failoverAttempt: true }
+      // A sustained rate limit gets one backoff before switching. Quota/auth never retry.
+      const result = await withRetry(() => fn(requestOpts), { retries: 1, baseDelay: opts.retryDelay ?? 1500,
+        shouldRetry: e => canSwitch() && e.category === 'RATE_LIMIT' })
+      if (!String(result.text || '').trim()) throw new Error('模型返回空正文')
+      modelCooldowns.delete(`${poolId}|${model}`)
+      return result
+    } catch (e) {
+      const category = e.category || policy.classify(e.status || 0, e.message)
+      if (!canSwitch() || !['MODEL_NOT_AVAILABLE', 'RATE_LIMIT', 'QUOTA', 'TIMEOUT', 'NETWORK'].includes(category)) throw e
+      modelCooldowns.set(`${poolId}|${model}`, Date.now() + 120000)
+      if (modelCooldowns.size > 128) modelCooldowns.delete(modelCooldowns.keys().next().value)
+      failures.push(model)
+      const to = candidates[candidates.indexOf(model) + 1]
+      if (to) {
+        const event = { from: policy.redact(model, [s.apiKey]), to: policy.redact(to, [s.apiKey]), reason: policy.redact(category + ': ' + e.message, [s.apiKey]) }
+        console.info('[LLM fallback]', JSON.stringify(event))
+        if (typeof opts.onModelSwitch === 'function') opts.onModelSwitch(event)
+      }
+    }
+  }
+  throw policy.modelError(0, `主模型和备用模型均未能完成请求（${failures.join('、')}）。请检查模型开通状态、额度和网络。`, [s.apiKey])
+}
+
 /** 非流式对话（带重试 + 自动续写） */
 async function chat(messages, opts = {}) {
+  if (opts.structured) {
+    // Repair a truncated structured object from scratch once; do not concatenate JSON fragments.
+    for (let repair = 0; repair < 2; repair++) {
+      const result = await routeRequest(requestOpts => chatOnceRaw(messages, requestOpts), opts)
+      if (!result.truncated) { opts.onGenerationResult?.({ generation_truncated: false }); return result.text }
+      opts.onGenerationResult?.({ generation_truncated: true, repair })
+      if (repair) throw Object.assign(new Error('结构化输出被截断，修复未完成；不会作为完整结果使用。'), { category: 'TRUNCATED', generation_truncated: true })
+      messages = [...messages, { role: 'user', content: '上一轮触及输出上限。请从头输出更紧凑但完整的合法 JSON，不省略必需字段，不要输出说明或 Markdown。' }]
+    }
+  }
   const r = await runWithContinuation(
     messages,
-    (m) => withRetry(() => chatOnceRaw(m, opts)),
+    (m) => routeRequest(requestOpts => chatOnceRaw(m, requestOpts), opts),
     null,
     opts
   )
-  return r.truncated && r.continuations > 0 ? r.text + truncatedNotice(r.continuations) : r.text
+  opts.onGenerationResult?.({ generation_truncated: r.truncated, continuations: r.continuations })
+  return r.truncated ? r.text + truncatedNotice(r.continuations) : r.text
 }
 
 /**
@@ -483,15 +519,13 @@ async function chatStream(messages, onDelta, opts = {}) {
     (m) => {
       // 每一轮续写重置计数，允许新一轮在开吐之前重试
       state.sent = 0
-      return withRetry(
-        () => chatStreamRaw(m, guarded, opts),
-        { shouldRetry: (e) => isTransient(e && e.message) && state.sent === 0 }
-      )
+      return routeRequest(requestOpts => chatStreamRaw(m, guarded, requestOpts), { ...opts, streaming: true }, () => state.sent === 0)
     },
     onDelta,
     opts
   )
-  return r.truncated && r.continuations > 0 ? r.text + truncatedNotice(r.continuations) : r.text
+  opts.onGenerationResult?.({ generation_truncated: r.truncated, continuations: r.continuations })
+  return r.truncated ? r.text + truncatedNotice(r.continuations) : r.text
 }
 
 /** 连通性测试 —— 返回结构化结果，便于前端展示真实错误 */
@@ -512,22 +546,25 @@ async function testConnection(override = {}) {
     // Node 22 默认把未处理的 rejection 当致命错误 → **整个服务进程结束**。
     // 用户视角：点一下「测试连接」，后端就没了。
     const s = loadSettings()
-    const baseUrl = typeof override.baseUrl === 'string' && override.baseUrl.trim() ? override.baseUrl : s.baseUrl
-    const apiKey = typeof override.apiKey === 'string' ? override.apiKey : s.apiKey
-    const model = typeof override.model === 'string' && override.model.trim() ? override.model : s.model
+    const resolved = resolveModel(override)
+    const baseUrl = resolved.baseUrl
+    const apiKey = typeof override.apiKey === 'string' ? override.apiKey.trim() : resolved.apiKey
+    const model = resolved.model
     if (!baseUrl) throw new Error('未填写 Base URL')
-    if (!apiKey) throw new Error('未填写 API Key')
+    if (!override.provider && !Object.hasOwn(override, 'apiKey') && !sameService(baseUrl, s.baseUrl) && !isLocalOllama(baseUrl)) throw new Error('已切换服务商，请填写该服务商的 API Key 后再测试')
+    if (!apiKey && !isLocalOllama(baseUrl)) throw new Error('未填写 API Key')
     if (!model) throw new Error('未填写模型名称')
     const text = await chat(
       [
         { role: 'system', content: '你是一个测试助手，只回复两个字。' },
         { role: 'user', content: '请回复：连通' },
       ],
-      { maxTokens: 32, temperature: 0, timeout: 30000, maxContinuations: 0, baseUrl, apiKey, model }
+      { maxTokens: 1024, temperature: 0, timeout: 30000, maxContinuations: 0, baseUrl, apiKey: apiKey || 'ollama', model }
     )
+    if (!String(text || '').trim()) throw new Error('接口已响应，但模型未返回正文；请检查模型权限或输出参数')
     return { ok: true, message: `连接成功，模型响应：${String(text).slice(0, 40)}`, sample: String(text).slice(0, 120) }
   } catch (e) {
-    return { ok: false, message: String(e.message || e) }
+    return { ok: false, message: policy.redact(e.message || e, [override.apiKey]), category: e.category || policy.classify(0, e.message) }
   }
 }
 

@@ -12,6 +12,35 @@ const PORT = Number(process.argv[2] || 18999)
 function pickContent(messages) {
   const sys = String((messages || []).find((m) => m.role === 'system')?.content || '')
   const user = String((messages || []).find((m) => m.role === 'user')?.content || '')
+  const last = String((messages || []).filter(m => m.role === 'user' && String(m.content).includes('【分批制作规范')).at(-1)?.content || (messages || []).filter(m => m.role === 'user').at(-1)?.content || '')
+  if (last.includes('【分批制作规范')) {
+    if (last.includes('片段概要')) return JSON.stringify({ events: ['本段人物发现线索并采取行动，保持原有故事顺序'] })
+    if (last.includes('紧凑剧情段落计划')) {
+      const total = Number(last.match(/总时长精确 (\d+)/)?.[1]) || 300
+      return JSON.stringify({ segments: [0, 1, 2].map(i => ({ sceneNo: i + 1, start: Math.round(total * i / 3 * 1000) / 1000, end: Math.round(total * (i + 1) / 3 * 1000) / 1000, beat: ['开端', '转折', '结局'][i] })) })
+    }
+    if (last.includes('本段：')) {
+      const segment = JSON.parse(last.match(/本段：(\{[^\n]+\})\n/)[1]), n = Math.ceil((segment.end - segment.start) / 6)
+      return JSON.stringify({ shots: Array.from({ length: n }, (_, i) => {
+        const start = Math.round((segment.start + (segment.end - segment.start) * i / n) * 1000) / 1000
+        const end = Math.round((segment.start + (segment.end - segment.start) * (i + 1) / n) * 1000) / 1000
+        return { no: i + 1, sceneNo: segment.sceneNo, start, end, duration: Math.round((end - start) * 1000) / 1000, beat: segment.beat }
+      }) })
+    }
+    if (last.includes('本批：')) {
+      const rows = JSON.parse(last.match(/本批：(\[[^\n]+\])\n/)[1])
+      return JSON.stringify({ shots: rows.map(s => ({ ...s, shotSize: '中景', angle: '平视', camera: 'ARRI Alexa 65', lens: '50mm', movement: '固定', composition: '下三分之一', subject: '孤独者', action: '拾起旧表', expression: '平静', environment: '废墟', lighting: '5600K', color: '冷青灰', material: '混凝土', sound: '风声', emotion: '孤独', transition: '硬切' })) })
+    }
+    if (last.includes('共用资产目录')) return JSON.stringify({ characterLock: { zh: '灰蓝风衣男性', en: 'man in grey coat' }, sceneAssets: [], imageAssets: [{ assetId: 'CHAR_01', type: 'character', sheet: 'character_reference', aspectRatio: '3:4', lockedFacts: ['灰蓝风衣'], allowedChange: '机位' }] })
+    if (last.includes('本批资产图提示词：')) {
+      const rows = JSON.parse(last.match(/本批资产图提示词：(\[[^\n]+\])\n/)[1])
+      return JSON.stringify({ imageAssets: rows.map(a => ({ ...a, promptZh: '中性背景人物多视图，固定灰蓝风衣', promptEn: 'character sheet, neutral background, grey coat', negative: '换脸' })) })
+    }
+    if (last.includes('本批镜头生成提示词和静态关键帧：')) {
+      const rows = JSON.parse(last.match(/本批镜头生成提示词和静态关键帧：(\[[^\n]+\])\n/)[1])
+      return JSON.stringify({ shots: rows.map(s => ({ no: s.no, start: s.start, end: s.end, promptZh: '主体：孤独者｜环境：废墟｜动作：拾表｜时间：5秒｜镜头：中景平视｜焦段：50mm｜摄影机运动：固定｜光线：5600K｜色彩：冷青灰｜材质：混凝土｜风格：写实｜情绪：孤独｜质量参数：24fps', promptEn: 'Subject: man | Environment: ruins | Action: picks watch | Time: 5s | Camera: medium | Lens: 50mm | Movement: static | Lighting: 5600K | Color: grey | Material: concrete | Style: realism | Emotion: solitude | Quality: 24fps', negative: '抖动', platform: 'seedance' })), keyframes: rows.map(s => ({ shotNo: s.no, phase: 'master', assetIds: ['CHAR_01'], aspectRatio: '21:9', promptZh: '人物手握旧表的静止瞬间', promptEn: 'man holding watch, still frame', negative: '换脸', motionNote: '抬手' })) })
+    }
+  }
 
   // ── Planner：必须返回严格 JSON ──
   if (sys.includes('规划器（Planner）')) {
@@ -159,9 +188,9 @@ const server = http.createServer((req, res) => {
     // 每轮只吐出 MOCK_TRUNC_CHARS 个字符并报 finish_reason='length'，
     // 直到客户端发来续写指令才给下一段。用于验证自动续写能拼出完整正文。
     if (MODE === 'truncate') {
-      const round = (payload.messages || [])
-        .filter((m) => m.role === 'user' && String(m.content || '').includes('【续写指令】')).length
-      const start = round * TRUNC_CHARS
+      const tail = (payload.messages || []).filter(m => m.role === 'assistant').at(-1)?.content || ''
+      const continuation = (payload.messages || []).some(m => m.role === 'user' && String(m.content).includes('【续写指令】'))
+      const start = continuation && tail && content.lastIndexOf(tail) >= 0 ? content.lastIndexOf(tail) + tail.length : 0
       const piece = content.slice(start, start + TRUNC_CHARS)
       const done = start + TRUNC_CHARS >= content.length
       const finish = done ? 'stop' : 'length'

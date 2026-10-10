@@ -53,7 +53,7 @@ async function suggest(s, no, instruction) {
   const text = await llm.chat([
     { role: 'system', content: '你是分镜编辑。只返回JSON对象，包含需要修改的字段。不可改编号、时长、起止时间，不可改其他镜头。未被要求修改的人物和环境保持原样。允许字段：' + FIELDS.filter(k => k !== 'duration').join(',') },
     { role: 'user', content: context },
-  ], { maxTokens: 3000 })
+  ], { role: 'shot_editor', structured: true, desiredOutputTokens: 3000 })
   let patch = extractJSONBlock(text, null, true)
   if (!patch) { try { patch = JSON.parse(text) } catch { fail('模型未返回有效JSON，原镜头未改变。', 422) } }
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) fail('模型候选必须是字段对象，原镜头未改变。', 422)

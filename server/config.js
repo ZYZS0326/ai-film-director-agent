@@ -9,16 +9,29 @@ const path = require('path')
 const DATA_DIR = process.env.AI_FILM_DATA_DIR || path.join(__dirname, 'data')
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json')
 
-const PRESETS = [
-  { id: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', note: '中文强，性价比高' },
-  { id: 'volcengine', name: '火山方舟 / 豆包', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', model: 'doubao-seed-2-1-pro-260628', note: '请按方舟控制台替换 Model ID' },
-  { id: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o', note: '接口模板，模型名请按账号可用项调整' },
-  { id: 'moonshot', name: 'Moonshot / Kimi', baseUrl: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-32k', note: '长上下文' },
-  { id: 'zhipu', name: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-plus', note: '中文创作佳' },
-  { id: 'qwen', name: '通义千问', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus', note: '中文强，稳定' },
-  { id: 'siliconflow', name: 'SiliconFlow', baseUrl: 'https://api.siliconflow.cn/v1', model: 'deepseek-ai/DeepSeek-V3', note: '多模型聚合' },
-  { id: 'ollama', name: '本地 Ollama', baseUrl: 'http://localhost:11434/v1', model: 'qwen2.5:14b', note: '完全离线' },
-]
+// One data registry. A user-data copy can replace it without modifying the packaged code.
+function modelCatalog() {
+  try { return JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'model-catalog.json'), 'utf8')) } catch {
+    return JSON.parse(fs.readFileSync(path.join(__dirname, 'model-catalog.json'), 'utf8'))
+  }
+}
+function providerOf(id, baseUrl) {
+  const list = modelCatalog().providers
+  return list.find(p => p.id === id || p.aliases?.includes(id)) ||
+    list.find(p => baseUrl && [p.baseUrl, ...(p.capabilityOrigins || [])].some(url => sameService(baseUrl, url))) || list.find(p => p.id === modelCatalog().defaultProvider) || list[0]
+}
+const PRESETS = modelCatalog().providers
+
+function isLocalOllama(baseUrl) {
+  try {
+    const url = new URL(baseUrl)
+    return ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) && url.protocol === 'http:' && url.port === '11434'
+  } catch { return false }
+}
+
+function sameService(a, b) {
+  try { return new URL(a).origin === new URL(b).origin } catch { return false }
+}
 
 /** 极简 .env 解析 */
 function loadEnvFile() {
@@ -69,12 +82,13 @@ const LIMITS = {
  * 这些都只在手改过设置文件时出现，但一旦出现，报错信息完全指不到真正的原因。
  */
 function strOr(v, fallback) {
-  return typeof v === 'string' && v.trim() ? v : fallback
+  return typeof v === 'string' && v.trim() ? v.trim() : fallback
 }
 
 /** 把任意来源的设置钳成安全值（读与写都走这里） */
 function sanitize(raw = {}) {
   const out = { ...raw }
+  const p = providerOf(raw.provider || raw.presetId, raw.baseUrl)
   out.temperature = (() => {
     const n = Number(raw.temperature)
     if (!Number.isFinite(n)) return LIMITS.temperature[2]
@@ -83,11 +97,20 @@ function sanitize(raw = {}) {
   out.maxTokens = clampNum(raw.maxTokens, ...LIMITS.maxTokens)
   out.contextWindow = clampNum(raw.contextWindow, ...LIMITS.contextWindow)
   // 字符串字段：类型不对就退回默认值（见 strOr 的注释）
-  out.baseUrl = strOr(raw.baseUrl, PRESETS[0].baseUrl)
-  out.model = strOr(raw.model, PRESETS[0].model)
+  out.baseUrl = strOr(raw.baseUrl, p.baseUrl)
+  out.model = strOr(raw.model, p.model)
   out.presetId = strOr(raw.presetId, PRESETS[0].id)
+  out.provider = providerOf(raw.provider || out.presetId, out.baseUrl).id
+  out.presetId = out.provider
+  out.roleModels = raw.roleModels && typeof raw.roleModels === 'object' && !Array.isArray(raw.roleModels)
+    ? Object.fromEntries(Object.entries(raw.roleModels).filter(([k, v]) => /^[a-z_]+$/.test(k) && v && typeof v === 'object' && typeof v.model === 'string' && v.model.trim()).map(([k, v]) => [k, { provider: providerOf(v.provider || out.provider).id, model: v.model.trim() }])) : {}
+  out.providerConfigs = raw.providerConfigs && typeof raw.providerConfigs === 'object' && !Array.isArray(raw.providerConfigs)
+    ? Object.fromEntries(Object.entries(raw.providerConfigs).filter(([, v]) => v && typeof v === 'object' && !Array.isArray(v)).map(([k, v]) => [k, {
+      baseUrl: strOr(v.baseUrl, providerOf(k).baseUrl), model: strOr(v.model, providerOf(k).model), apiKey: typeof v.apiKey === 'string' ? v.apiKey : '',
+      fallbackModels: Array.isArray(v.fallbackModels) ? v.fallbackModels.filter(x => typeof x === 'string' && x.trim()).slice(0, 4) : undefined,
+    }])) : {}
   // apiKey 允许为空串（演示模式），所以只做类型检查、不要求非空
-  out.apiKey = typeof raw.apiKey === 'string' ? raw.apiKey : ''
+  out.apiKey = typeof raw.apiKey === 'string' ? raw.apiKey.trim() : ''
   out.theme = raw.theme === 'light' ? 'light' : 'dark'
   out.stream = raw.stream !== false
   return out
@@ -108,18 +131,28 @@ function loadSettings() {
     }
   } catch { /* 解析失败：退回默认值 */ }
 
+  const selected = saved.provider || saved.presetId || (saved.baseUrl ? providerOf(null, saved.baseUrl).id :
+    env.LLM_PROVIDER || (env.LLM_BASE_URL ? providerOf(null, env.LLM_BASE_URL).id : env.ARK_API_KEY ? 'ark' : modelCatalog().defaultProvider))
+  const p = providerOf(selected, saved.baseUrl)
   const next = sanitize({
-    baseUrl: saved.baseUrl || env.LLM_BASE_URL || PRESETS[0].baseUrl,
-    apiKey: saved.apiKey || env.LLM_API_KEY || '',
-    model: saved.model || env.LLM_MODEL || PRESETS[0].model,
+    baseUrl: saved.baseUrl || (p.id === 'ark' ? env.ARK_BASE_URL : env.LLM_BASE_URL) || p.baseUrl,
+    apiKey: typeof saved.apiKey === 'string' ? saved.apiKey : (p.id === 'ark' ? env.ARK_API_KEY : env.LLM_API_KEY) || '',
+    model: saved.model || env.LLM_MODEL || p.model,
     temperature: saved.temperature ?? env.LLM_TEMPERATURE ?? LIMITS.temperature[2],
     maxTokens: saved.maxTokens ?? env.LLM_MAX_TOKENS ?? LIMITS.maxTokens[2],
     // 模型上下文窗口（token）。决定每个环节能塞进多少历史产出与知识库。
     contextWindow: saved.contextWindow ?? env.LLM_CONTEXT_WINDOW ?? LIMITS.contextWindow[2],
-    presetId: saved.presetId || 'deepseek',
+    presetId: p.id,
+    provider: p.id,
+    roleModels: saved.roleModels,
+    providerConfigs: saved.providerConfigs,
     theme: saved.theme || 'light',
     stream: saved.stream !== false,
+    fallbackModels: Array.isArray(saved.fallbackModels) ? saved.fallbackModels.filter(m => typeof m === 'string' && m.trim()).slice(0, 4) : undefined,
   })
+
+  // Only migrate retired built-in defaults on their official service, never custom gateways.
+  if (sameService(next.baseUrl, PRESETS[0].baseUrl) && next.model === 'deepseek-chat') next.model = PRESETS[0].model
 
   // 存量自愈：若磁盘上的数值越界（例如历史遗留的 1e+99），就地改写成合法值。
   // 直接写文件，不走 saveSettings，避免递归。
@@ -150,7 +183,15 @@ function writeSettingsFile(next) {
 
 function saveSettings(patch) {
   const current = loadSettings()
-  const next = sanitize({ ...current, ...patch })
+  const provider = providerOf(patch.provider || patch.presetId || (patch.baseUrl ? providerOf(null, patch.baseUrl).id : current.provider)).id
+  const providerConfigs = { ...current.providerConfigs, [current.provider]: { baseUrl: current.baseUrl, apiKey: current.apiKey, model: current.model, fallbackModels: current.fallbackModels } }
+  const switching = provider !== current.provider
+  const restored = switching ? providerConfigs[provider] || { baseUrl: providerOf(provider).baseUrl, apiKey: '', model: providerOf(provider).model, fallbackModels: undefined } : {}
+  const merged = { ...current, ...restored, ...patch, provider, presetId: provider, providerConfigs }
+  if (switching && !patch.provider && !patch.presetId && !Object.hasOwn(patch, 'apiKey')) merged.apiKey = ''
+  // Never reuse a key across origins, including when editing a saved profile's URL.
+  if (!Object.hasOwn(patch, 'apiKey') && !sameService(merged.baseUrl, switching ? restored.baseUrl : current.baseUrl)) merged.apiKey = ''
+  const next = sanitize(merged)
   writeSettingsFile(next)
   return next
 }
@@ -167,10 +208,30 @@ function publicSettings() {
     presetId: s.presetId,
     theme: s.theme,
     hasKey: Boolean(s.apiKey),
-    keyMask: s.apiKey ? s.apiKey.slice(0, 4) + '****' + s.apiKey.slice(-4) : '',
-    presets: PRESETS,
-    mode: s.apiKey ? 'llm' : 'demo',
+    keyMask: s.apiKey ? '已保存（隐藏）' : '',
+    provider: s.provider,
+    roleModels: s.roleModels,
+    roles: [{ id: 'planner', name: '任务规划' }, { id: 'reviewer', name: '环节审核' }, { id: 'shot_editor', name: '局部镜头编辑' }, { id: 'assistant', name: '创作问答' }, ...require('./skills').SKILLS.map(x => ({ id: x.id, name: x.name }))],
+    fallbackModels: s.fallbackModels,
+    providerConfigs: Object.fromEntries(Object.entries(s.providerConfigs).map(([k, v]) => [k, { baseUrl: v.baseUrl, model: v.model, fallbackModels: v.fallbackModels, hasKey: Boolean(v.apiKey) }])),
+    presets: modelCatalog().providers.map(p => ({ ...p, models: p.models.filter(m => m.enabled !== false) })),
+    mode: s.apiKey || isLocalOllama(s.baseUrl) ? 'llm' : 'demo',
   }
 }
 
-module.exports = { loadSettings, saveSettings, publicSettings, PRESETS, DATA_DIR }
+function resolveModel(opts = {}) {
+  const s = loadSettings()
+  const role = s.roleModels[opts.role]
+  const provider = providerOf(opts.provider || (opts.baseUrl ? providerOf(null, opts.baseUrl).id : role?.provider || s.provider))
+  const profile = provider.id === s.provider ? s : s.providerConfigs[provider.id] || {}
+  const env = { ...loadEnvFile(), ...process.env }
+  const baseUrl = opts.baseUrl || profile.baseUrl || (provider.id === 'ark' ? env.ARK_BASE_URL : '') || provider.baseUrl
+  const apiKey = Object.hasOwn(opts, 'apiKey') ? opts.apiKey : sameService(baseUrl, profile.baseUrl || provider.baseUrl)
+    ? profile.apiKey ?? (provider.id === 'ark' ? env.ARK_API_KEY : '') ?? '' : ''
+  const model = opts.model || role?.model || profile.model || provider.model
+  // Capability is provider-scoped; no prefix guesses or Model/Endpoint ID rewriting.
+  const capability = [provider.baseUrl, ...(provider.capabilityOrigins || [])].some(url => sameService(baseUrl, url)) ? provider.models.find(m => m.id === model) || {} : {}
+  return { ...s, baseUrl, apiKey, model, provider: provider.id, capability,
+    fallbackModels: profile.fallbackModels ?? (provider.models.some(m => m.id === model && m.enabled !== false) ? (provider.fallbackModels || []).filter(id => provider.models.some(m => m.id === id && m.enabled !== false)) : []) }
+}
+module.exports = { loadSettings, saveSettings, publicSettings, resolveModel, modelCatalog, providerOf, PRESETS, DATA_DIR, isLocalOllama, sameService }

@@ -66,7 +66,7 @@ ${history.length ? '\n【最近对话】\n' + history.slice(-6).map((h) => `${h.
       ],
       // 规划结果必须是严格 JSON：截断后自动续写只会拼出「JSON + 散文」，更难解析，
       // 也白白浪费轮次。这里关掉续写，让上层直接走规则降级。
-      { temperature: 0.2, maxTokens: 1200, maxContinuations: 0 }
+      { role: 'planner', structured: true, temperature: 0.2, desiredOutputTokens: 1200, maxContinuations: 0 }
     )
     const parsed = safeParseJSON(raw)
     if (!parsed || !parsed.intent) throw new Error('planner 输出无法解析')

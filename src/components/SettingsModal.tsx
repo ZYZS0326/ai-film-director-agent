@@ -21,13 +21,22 @@ export default function SettingsModal({ onClose, onSaved, toast }: Props) {
   if (!s) return null
 
   const pickPreset = (p: Settings['presets'][number]) => {
-    setS({ ...s, presetId: p.id, baseUrl: p.baseUrl, model: p.model })
+    const changed = p.baseUrl !== s.baseUrl
+    const profile = p.id === s.provider ? { baseUrl: s.baseUrl, model: s.model, hasKey: s.hasKey, fallbackModels: s.fallbackModels } : s.providerConfigs?.[p.id]
+    if (changed) setApiKey('')
+    setTestResult(null)
+    setS({ ...s, provider: p.id, presetId: p.id, baseUrl: profile?.baseUrl || p.baseUrl, model: profile?.model || p.model, fallbackModels: profile?.fallbackModels,
+      maxTokens: 8192, contextWindow: p.id === 'ollama' ? 32768 : 131072,
+      hasKey: profile?.hasKey ?? (changed ? false : s.hasKey), keyMask: profile?.hasKey ? '已保存（隐藏）' : changed ? '' : s.keyMask,
+      mode: p.id === 'ollama' || profile?.hasKey || (!changed && s.hasKey) ? 'llm' : 'demo' })
   }
 
   const save = async () => {
     try {
       const next = await api.saveSettings({
-        baseUrl: s.baseUrl, model: s.model, presetId: s.presetId,
+        baseUrl: s.baseUrl, model: s.model, presetId: s.presetId, provider: s.provider,
+        roleModels: s.roleModels || {},
+        ...(s.fallbackModels !== undefined ? { fallbackModels: s.fallbackModels } : {}),
         temperature: s.temperature,
         maxTokens: Math.min(65536, Math.max(256, s.maxTokens || 8192)),
         contextWindow: s.contextWindow ?? 32768,
@@ -50,6 +59,7 @@ export default function SettingsModal({ onClose, onSaved, toast }: Props) {
       // 用户测完直接关掉弹窗，以为改动被丢弃了，其实已经生效。
       const r = await api.testSettings({
         baseUrl: s.baseUrl,
+        provider: s.provider,
         model: s.model,
         ...(apiKey ? { apiKey } : {}),
       })
@@ -70,9 +80,11 @@ export default function SettingsModal({ onClose, onSaved, toast }: Props) {
         </div>
 
         <div className="modal-body">
-          <div className={`notice ${s.hasKey ? 'ok' : 'warn'}`}>
-            {s.hasKey
-              ? `已连接 LLM（${s.keyMask}）。所有创作环节由真实大模型驱动。`
+          <div className={`notice ${s.mode === 'llm' ? 'ok' : 'warn'}`}>
+            {s.presetId === 'ollama'
+              ? '本地 Ollama 无需 API Key。请先启动 Ollama 并下载所选模型，然后测试连接。'
+              : s.hasKey
+              ? `已保存 API Key（${s.keyMask}）。请测试连接确认模型可用。`
               : '未配置 API Key —— 当前运行在「演示模式」：导演流水线、知识库检索、结构化分镜与提示词均可完整运行，但文本由内置引擎生成。填入任意 OpenAI 兼容接口的 Key 即可切换为真实 LLM 创作。'}
           </div>
 
@@ -94,7 +106,7 @@ export default function SettingsModal({ onClose, onSaved, toast }: Props) {
               <div className="api-guide-table" role="table" aria-label="常见服务商配置示例">
                 <div className="api-guide-row api-guide-head" role="row"><span role="columnheader">服务</span><span role="columnheader">Base URL</span><span role="columnheader">模型填写方式</span></div>
                 <div className="api-guide-row" role="row"><strong role="cell">火山方舟</strong><code role="cell">https://ark.cn-beijing.volces.com/api/v3</code><span role="cell">控制台的 Model ID / Endpoint ID</span></div>
-                <div className="api-guide-row" role="row"><strong role="cell">DeepSeek</strong><code role="cell">https://api.deepseek.com/v1</code><span role="cell">例如 deepseek-chat</span></div>
+                <div className="api-guide-row" role="row"><strong role="cell">DeepSeek</strong><code role="cell">https://api.deepseek.com/v1</code><span role="cell">deepseek-flash</span></div>
                 <div className="api-guide-row" role="row"><strong role="cell">其他兼容服务</strong><span role="cell">服务商文档中的 OpenAI Compatible Base URL</span><span role="cell">服务商提供的模型名称</span></div>
                 <div className="api-guide-row" role="row"><strong role="cell">本地 Ollama</strong><code role="cell">http://localhost:11434/v1</code><span role="cell">本机已下载的模型名</span></div>
               </div>
@@ -115,21 +127,44 @@ export default function SettingsModal({ onClose, onSaved, toast }: Props) {
           </div>
 
           <div className="field">
-            <label className="field-label">Base URL</label>
-            <input className="input" value={s.baseUrl} onChange={(e) => setS({ ...s, baseUrl: e.target.value })} placeholder="https://api.deepseek.com/v1" />
+            <label className="field-label" htmlFor="api-base-url">Base URL</label>
+            <input id="api-base-url" className="input" value={s.baseUrl} onChange={(e) => { setTestResult(null); setS({ ...s, baseUrl: e.target.value }) }} placeholder="https://api.deepseek.com/v1" />
             <div className="field-hint">填写服务商提供的 OpenAI 兼容基础地址；版本路径可能是 /v1、/v4 或 /api/v3，不要追加 /chat/completions。</div>
           </div>
 
           <div className="field">
-            <label className="field-label">API Key</label>
-            <input className="input" type="password" value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder={s.hasKey ? '已保存，留空则不修改' : 'sk-...'} />
+            <label className="field-label" htmlFor="api-key">API Key{s.presetId === 'ollama' ? '（本地无需填写）' : ''}</label>
+            <input id="api-key" className="input" type="password" value={apiKey} autoComplete="off"
+              onChange={(e) => { setTestResult(null); setApiKey(e.target.value) }}
+              placeholder={s.hasKey ? '已保存，留空则不修改' : '填写所选服务商的 API Key'} />
           </div>
 
           <div className="field">
-            <label className="field-label">模型</label>
-            <input className="input" value={s.model} onChange={(e) => setS({ ...s, model: e.target.value })} placeholder="deepseek-chat" />
+            <label className="field-label" htmlFor="api-model">模型</label>
+            <input id="api-model" className="input" list="model-options" aria-describedby="model-help" value={s.model} onChange={(e) => { setTestResult(null); setS({ ...s, model: e.target.value }) }} placeholder="选择或填写 Model ID / Endpoint ID" />
+            <datalist id="model-options">{s.presets.find(p => p.id === s.presetId)?.models?.map(m => <option key={m.id} value={m.id}>{m.label || m.id}</option>)}</datalist>
+            <div id="model-help" className="field-hint">可选择目录内模型，也可直接填写任何 Model ID 或 ep-…；标识原样发送，不需要更改接口地址。</div>
+          </div>
+
+          <details className="api-guide">
+            <summary>高级：各角色独立选模型（可选）</summary>
+            <div className="field-hint">留空使用主模型。跨服务商使用前，请先在对应预设中保存 Key。目录和能力可通过本机数据目录的 model-catalog.json 配置。</div>
+            {(s.roles || []).map(role => {
+              const value = s.roleModels?.[role.id]
+              return <div className="field" key={role.id}>
+                <label className="field-label" htmlFor={`role-${role.id}`}>{role.name} · 模型（可选）</label>
+                <select className="input" aria-label={`${role.name}服务商`} value={value?.provider || s.provider} onChange={e => setS({ ...s, roleModels: { ...s.roleModels, [role.id]: { model: value?.model || '', provider: e.target.value } } })}>
+                  {s.presets.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+                <input className="input" id={`role-${role.id}`} value={value?.model || ''} placeholder={`继承主模型：${s.model}`} onChange={e => setS({ ...s, roleModels: { ...s.roleModels, [role.id]: { provider: value?.provider || s.provider, model: e.target.value } } })} />
+              </div>
+            })}
+          </details>
+
+          <div className="field">
+            <label className="field-label" htmlFor="fallback-models">备用模型（可选，逗号分隔）</label>
+            <input id="fallback-models" className="input" value={(s.fallbackModels ?? s.presets.find(p => p.id === s.presetId)?.fallbackModels ?? []).join(', ')} onChange={e => setS({ ...s, fallbackModels: e.target.value.split(',').map(x => x.trim()).filter(Boolean) })} aria-describedby="fallback-help" />
+            <div id="fallback-help" className="field-hint">仅在限流持续、额度耗尽或接口不可用时切换；清空可禁用。不会因内容质量或 JSON 格式切换。</div>
           </div>
 
           <div className="field">
@@ -143,12 +178,11 @@ export default function SettingsModal({ onClose, onSaved, toast }: Props) {
           </div>
 
           <div className="field">
-            <label className="field-label">单次输出上限（Max Tokens）</label>
+            <label className="field-label">期望单次输出预算（Tokens）</label>
             <input className="input" type="number" min={256} max={65536} step={256} value={s.maxTokens}
               onChange={(e) => setS({ ...s, maxTokens: Number(e.target.value) })} />
             <div className="field-hint">
-              模型单次回复的 token 上限。超了会自动续写补全，无需手动调高；
-              但值越大，单轮能写的内容越多、速度越快。建议 4096 – 16384。
+              这是期望值，不是模型硬上限；发送前会按模型能力和剩余上下文压低。长内容安全分段续写，无需填写超大值。
             </div>
           </div>
 
@@ -169,7 +203,7 @@ export default function SettingsModal({ onClose, onSaved, toast }: Props) {
           </div>
 
           {testResult && (
-            <div className={`notice ${testResult.ok ? 'ok' : 'err'}`}>
+            <div role="status" aria-live="polite" className={`notice ${testResult.ok ? 'ok' : 'err'}`}>
               {testResult.ok ? '✓ ' : '✕ '}{testResult.message}
             </div>
           )}
@@ -185,7 +219,7 @@ export default function SettingsModal({ onClose, onSaved, toast }: Props) {
           <button className="icon-btn" onClick={test} disabled={testing}>
             {testing ? '测试中…' : '测试连接'}
           </button>
-          <button className="icon-btn primary" onClick={save}>保存</button>
+          <button className="icon-btn primary" onClick={save} disabled={testing}>保存</button>
         </div>
       </div>
     </div>

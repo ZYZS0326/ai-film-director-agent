@@ -10,4 +10,4 @@ For changes, add a regression test first. Editing must preserve locked shots, or
 
 Do not use a build command that deletes old releases automatically. Release binaries must be attached to GitHub Releases, not committed to the source repository.
 
-The project owner must choose a license before accepting third-party contributions or describing the repository as open source.
+This repository is source-available under the personal non-commercial license in `LICENSE`; it is not OSI-approved open-source software. Do not submit code, assets, or documentation unless you have the right to license your contribution under terms compatible with `LICENSE`. Contributions are not accepted as relicensing or commercial-use permission. Obtain written authorization from the copyright holder before commercial use, redistribution, or offering the software as a service.

@@ -12,6 +12,7 @@ const { CONTRACT_BY_SKILL } = require('../skills/contracts')
 const { getTool } = require('../tools')
 const { productionChecks } = require('./production-checks')
 const { reviewStage } = require('./stage-review')
+const batchedProduction = require('./batched-production')
 
 function constraintsText(c) {
   const parts = []
@@ -110,7 +111,7 @@ function shortOutputNotice(length) {
 }
 
 /** 中文为主：保守估算 1 字符 ≈ 0.75 token（宁可高估，保证安全） */
-const estTokens = (s) => Math.ceil(String(s || '').length * 0.75)
+const { estTokens, effectiveBudget } = require('./model-policy')
 
 /**
  * 构建某个环节的上下文。
@@ -181,14 +182,9 @@ function fitContext(skill, buildCtx, capChars, extraSuffix = '') {
  * 依据「模型上下文窗口 - 本次要预留给输出的空间」反推。
  * 输出预留 = maxTokens × 1.15（留出标点/格式开销）+ 固定余量。
  */
-function inputCapChars() {
-  const s = loadSettings()
-  const win = Number(s.contextWindow) || 32768
-  const want = Number(s.maxTokens) || 8192
-  // 必须与 llm.effectiveMaxTokens 用同一口径：小窗口下输出预算会被压到 win*0.45，
-  // 这里按未压缩值预留会白白吃掉输入空间。
-  const out = Math.max(1024, Math.min(want, Math.floor(win * 0.45)))
-  const capTokens = Math.floor(win * 0.85) - Math.ceil(out * 1.15) - 600
+function inputCapChars(role) {
+  const budget = effectiveBudget([], { role })
+  const capTokens = Math.floor(budget.window * 0.85) - Math.ceil(budget.effective * 1.15) - 600
   // token → 字符（0.75 token/字），并设下限，避免预算压到 0 导致产出没内容
   return Math.max(3200, Math.floor(Math.max(capTokens, 2400) / 0.75))
 }
@@ -294,7 +290,8 @@ async function run(session, message, emit, opts = {}) {
           { role: 'system', content: sys },
           { role: 'user', content: `${ctxSummary}\n\n【问题】${message}` },
         ],
-        (d) => emit('answer_delta', { delta: d })
+        (d) => emit('answer_delta', { delta: d }),
+        { role: 'assistant' }
       )
     } else if (!answer) {
       answer = '（演示模式）我已记录你的问题。在「设置」中填入 LLM API Key 后，我可以展开完整的电影创作讨论。\n\n你也可以直接给我一个想法——我会主动完成从创意到成片方案的完整决策，例如："一个人在宇宙尽头寻找死亡的答案，做成 5 分钟的宽银幕。"'
@@ -356,7 +353,6 @@ async function run(session, message, emit, opts = {}) {
   session.pendingSkills = [...new Set([...(session.pendingSkills || []), ...skills])]
   memory.saveSession(session)
 
-  const capChars = inputCapChars()
   const revisionText = planResult.intent === 'revision' ? message : null
 
   const buildCtx = (skillId, sc = 1) => makeCtx(session, knowledge, revisionText, skillId, sc)
@@ -366,7 +362,7 @@ async function run(session, message, emit, opts = {}) {
    * 这样无论用户填的是 8k 还是 128k 上下文，都不用手动调参数。
    */
   const fitCtx = (skill, extraSuffix = '') =>
-    fitContext(skill, buildCtx, capChars, extraSuffix)
+    fitContext(skill, buildCtx, inputCapChars(skill.id), extraSuffix)
 
   let fatal = null
   let aborted = false
@@ -424,7 +420,25 @@ async function run(session, message, emit, opts = {}) {
               { role: 'system', content: skill.systemPrompt },
               { role: 'user', content: skill.buildPrompt(ctx) + revisionPrefix + contract },
             ]
-            text = await llm.chatStream(messages, (d) => emit('delta', { skill: skill.id, delta: d }), {
+            if (['storyboard', 'prompt_engineering'].includes(skill.id)) {
+              text = await batchedProduction.generate({ skill, messages, ctx, session, isAborted,
+                // Context compaction is transport-only: don't discard accepted batches on retry.
+                inputIdentity: { system: skill.systemPrompt, contract, brief: session.brief, revision: revisionText,
+                  constraints: session.constraints, prior: Object.fromEntries((PRIOR_DEPS[skill.id] || []).map(k => [k, session.outputs?.[k]])) },
+                checkpoint: () => memory.saveSession(session),
+                onBatch: b => emit('status', { phase: b.phase === 'switch' ? 'retrying' : 'continuing',
+                  text: b.phase === 'switch' ? `${skill.name}：${b.from} 未能响应，正在切换至 ${b.to}…`
+                    : b.phase === 'outline' ? `${skill.name}：读取完整剧本 ${b.from} / ${b.total}…`
+                    : b.phase === 'planning' ? `${skill.name}：规划全片镜头和时间轴…`
+                    : b.phase === 'assets' ? `${skill.name}：建立共用资产…`
+                    : `${skill.name}：制作${b.phase === 'assetBatch' ? '资产' : '镜'} ${b.from}–${b.to} / ${b.total}…` }),
+              })
+              emit('delta', { skill: skill.id, delta: text })
+            } else text = await llm.chatStream(messages, (d) => emit('delta', { skill: skill.id, delta: d }), {
+              role: skill.id,
+              maxContinuations: 24,
+              onGenerationResult: result => { if (result.generation_truncated) stageFailed = true },
+              onModelSwitch: event => emit('status', { phase: 'retrying', modelSwitch: event, text: `${skill.name}：${event.from} 未能响应，正在切换至 ${event.to}…` }),
               // 输出被模型上限截断时会自动续写，这里给出可见进度，避免界面像卡住
               onContinue: (n) => emit('status', {
                 phase: 'continuing',
@@ -452,8 +466,10 @@ async function run(session, message, emit, opts = {}) {
         await streamDemo(text, (d) => emit('delta', { skill: skill.id, delta: d }))
       }
     } catch (e) {
+      if (e.category === 'STOPPED') { aborted = true; break }
       stageFailed = true
       const msg = String(e.message || e)
+      if (['storyboard', 'prompt_engineering'].includes(skill.id)) fatal = msg
       emit('error', { skill: skill.id, message: msg })
       text = (session.outputs[skill.outputKey] || '') + `\n\n> ⚠️ 本环节生成失败：${msg.slice(0, 200)}`
       // LLM 连通性 / 鉴权 / 配额类错误：中断后续环节。
@@ -480,7 +496,7 @@ async function run(session, message, emit, opts = {}) {
               content: skill.buildPrompt(ctx) + revisionPrefix + contract + tighter,
             },
           ],
-          { timeout: 240000 }
+          { role: skill.id, timeout: 240000, onGenerationResult: result => { if (result.generation_truncated) stageFailed = true } }
         )
         if (String(again || '').trim().length > String(text || '').trim().length) {
           text = again
@@ -499,10 +515,10 @@ async function run(session, message, emit, opts = {}) {
     // ── 结构化解析（Tool Calling）──
     let parsed = null
     if (skill.id === 'storyboard') {
-      const shots = getTool('shotlist.parse').run({ text }).shots
+      const shots = stageFailed ? [] : getTool('shotlist.parse').run({ text }).shots
       if (!stageFailed) session.shots = shots || []
       if (!shots?.length) stageFailed = true
-      if (shots?.length) {
+      if (!stageFailed && shots?.length) {
         session.shots = shots
         parsed = { shots: shots.length }
       }
@@ -510,7 +526,7 @@ async function run(session, message, emit, opts = {}) {
       const data = getTool('prompts.parse').run({ text })
       if (!stageFailed) session.promptData = data || null
       if (!data?.shots?.length) stageFailed = true
-      if (data) {
+      if (!stageFailed && data) {
         // 兜底：模型没吐出 characterLock，但上一环节的连续性圣经已经锁定了角色。
         // 两者必须一致 —— 与其让面板空白，不如直接复用已锁定的片段。
         const cont = session.continuityData
@@ -549,7 +565,7 @@ async function run(session, message, emit, opts = {}) {
       const data = getTool('continuity.parse').run({ text })
       if (!stageFailed) session.continuityData = data || null
       if (!data || !(data.lockZh || data.rules?.length)) stageFailed = true
-      if (data && (data.lockZh || (data.rules && data.rules.length))) {
+      if (!stageFailed && data && (data.lockZh || (data.rules && data.rules.length))) {
         session.continuityData = data
         parsed = { lock: !!data.lockZh, rules: (data.rules || []).length }
       }
@@ -597,7 +613,8 @@ async function run(session, message, emit, opts = {}) {
       productionChecks: productionChecks(session),
     })
     memory.saveSession(session)
-    if (staged && stageReview?.status === 'block') { blockedReview = true; break }
+    // Legacy full-pipeline runs must not feed incomplete output into dependent stages either.
+    if (stageFailed || staged && stageReview?.status === 'block') { blockedReview = true; break }
   }
 
   if (fatal) {
@@ -624,7 +641,7 @@ async function run(session, message, emit, opts = {}) {
   session.messages.push({
     role: 'assistant',
     content: blockedReview
-      ? '当前环节审核未通过，已暂停后续制作。请查看问题并修改或重试。'
+      ? '当前环节未完整完成或审核未通过，已暂停后续制作。请查看问题并修改或重试。'
       : aborted
       ? `已停止（已完成 ${Object.keys(session.outputs || {}).length} 个环节，成果已保存）`
       : `已完成：${skills.map((s) => BY_ID[s].name).join(' → ')}`,

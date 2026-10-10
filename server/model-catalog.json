@@ -1,0 +1,19 @@
+{
+  "defaultProvider": "deepseek",
+  "unknown": { "context_window": 32768, "max_output_tokens": 4096 },
+  "taskBudgets": { "planner": 1200, "reviewer": 600, "shot_editor": 3000, "assistant": 2048, "stage": 8192 },
+  "providers": [
+    { "id": "deepseek", "name": "DeepSeek", "baseUrl": "https://api.deepseek.com/v1", "model": "deepseek-flash", "note": "填入平台 API Key", "models": [{ "id": "deepseek-flash", "enabled": true, "supports_thinking": true }, { "id": "deepseek-v4-flash", "enabled": true, "supports_thinking": true }, { "id": "deepseek-v4-pro", "enabled": true, "supports_thinking": true }] },
+    { "id": "ark", "aliases": ["volcengine"], "name": "火山方舟 / 豆包", "baseUrl": "https://ark.cn-beijing.volces.com/api/v3", "model": "doubao-seed-2-1-pro-260628", "note": "选择模型，填入 ARK_API_KEY 即可使用", "fallbackModels": ["doubao-seed-2-0-lite-260428", "doubao-seed-2-0-mini-260428"], "models": [
+      { "id": "doubao-seed-2-1-pro-260628", "label": "豆包 Seed 2.1 Pro", "enabled": true, "context_window": 262144, "max_output_tokens": 262144, "supports_temperature": true, "supports_thinking": true, "supports_json": true },
+      { "id": "doubao-seed-2-0-lite-260428", "label": "豆包 Seed 2.0 Lite", "enabled": true, "supports_thinking": true },
+      { "id": "doubao-seed-2-0-mini-260428", "label": "豆包 Seed 2.0 Mini", "enabled": true, "supports_thinking": true }
+    ] },
+    { "id": "openai", "name": "OpenAI", "baseUrl": "https://api.openai.com/v1", "model": "gpt-4.1-mini", "note": "填入 API 平台密钥", "models": [{ "id": "gpt-4.1-mini", "enabled": true }] },
+    { "id": "moonshot", "capabilityOrigins": ["https://api.moonshot.ai/v1"], "name": "Moonshot / Kimi", "baseUrl": "https://api.moonshot.cn/v1", "model": "kimi-k2.6", "note": "国内开放平台 Key；国际账号改用 api.moonshot.ai/v1", "models": [{ "id": "kimi-k2.6", "enabled": true, "supports_thinking": true, "supports_temperature": false }] },
+    { "id": "zhipu", "capabilityOrigins": ["https://api.z.ai/v1"], "name": "智谱 GLM", "baseUrl": "https://open.bigmodel.cn/api/paas/v4", "model": "glm-4.7", "note": "智谱开放平台 Key，不是 Coding Plan 专用 Key", "models": [{ "id": "glm-4.7", "enabled": true, "supports_thinking": true }] },
+    { "id": "qwen", "name": "通义千问", "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-plus", "note": "中文强，稳定", "models": [{ "id": "qwen-plus", "enabled": true }] },
+    { "id": "siliconflow", "name": "SiliconFlow", "baseUrl": "https://api.siliconflow.cn/v1", "model": "deepseek-ai/DeepSeek-V4-Flash", "note": "填入硅基流动 API Key", "models": [{ "id": "deepseek-ai/DeepSeek-V4-Flash", "enabled": true }] },
+    { "id": "ollama", "name": "本地 Ollama", "baseUrl": "http://localhost:11434/v1", "model": "qwen3:8b", "note": "无需 Key；先下载所选模型", "models": [{ "id": "qwen3:8b", "enabled": true }] }
+  ]
+}

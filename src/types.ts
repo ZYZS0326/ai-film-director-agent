@@ -149,10 +149,15 @@ export interface Settings {
   maxTokens: number
   contextWindow: number
   presetId: string
+  provider: string
+  roleModels: Record<string, { provider: string; model: string }>
+  roles: { id: string; name: string }[]
+  providerConfigs: Record<string, { baseUrl: string; model: string; hasKey: boolean; fallbackModels?: string[] }>
+  fallbackModels?: string[]
   theme: 'dark' | 'light'
   hasKey: boolean
   keyMask: string
-  presets: { id: string; name: string; baseUrl: string; model: string; note: string }[]
+  presets: { id: string; name: string; baseUrl: string; model: string; note: string; fallbackModels?: string[]; models: { id: string; label?: string }[] }[]
   mode: 'llm' | 'demo'
 }
 

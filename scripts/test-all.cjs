@@ -1,9 +1,9 @@
 // Every suite runs in a child process. Real user settings and API keys are never used.
 const { spawnSync } = require('child_process')
 const fs = require('fs'), os = require('os'), path = require('path')
-const suites = ['agent-smoke', 'ui-smoke', 'llm-smoke', 'llm-hostile', 'prompt-budget', 'llm-continuation', 'parser-smoke', 'pipeline-wiring', 'session-robustness', 'stop-signal', 'knowledge-integrity', 'input-robustness', 'production-checks', 'production-api', 'shot-editor-test', 'security-smoke', 'references-smoke', 'staged-workflow']
+const suites = ['batched-production', 'ark-budget', 'provider-regression', 'model-failover', 'agent-smoke', 'ui-smoke', 'llm-smoke', 'llm-hostile', 'prompt-budget', 'llm-continuation', 'parser-smoke', 'pipeline-wiring', 'session-robustness', 'stop-signal', 'knowledge-integrity', 'input-robustness', 'production-checks', 'production-api', 'shot-editor-test', 'security-smoke', 'references-smoke', 'staged-workflow']
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'afd-all-'))
-const env = { ...process.env, AI_FILM_DATA_DIR: root, AIFD_TEST_MODE: '1', LLM_API_KEY: '', LLM_BASE_URL: '', LLM_MODEL: '' }
+const env = { ...process.env, AI_FILM_DATA_DIR: root, AIFD_TEST_MODE: '1', LLM_API_KEY: '', LLM_BASE_URL: '', LLM_MODEL: '', ARK_API_KEY: '', ARK_BASE_URL: '', LLM_PROVIDER: '' }
 let failed = false
 const reports = path.join(__dirname, '../build/test-reports')
 fs.mkdirSync(reports, { recursive: true })

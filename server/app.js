@@ -83,7 +83,7 @@ function createApp() {
   // ── 设置 ────────────────────────────────────────────────
   app.get('/api/settings', (req, res) => res.json(publicSettings()))
   app.post('/api/settings', (req, res) => {
-    const { baseUrl, apiKey, model, temperature, maxTokens, contextWindow, presetId, theme } = req.body || {}
+    const { baseUrl, apiKey, model, temperature, maxTokens, contextWindow, presetId, theme, provider, roleModels, fallbackModels } = req.body || {}
     const patch = {}
     if (baseUrl !== undefined) patch.baseUrl = baseUrl
     if (apiKey !== undefined && apiKey !== '') patch.apiKey = apiKey
@@ -93,6 +93,9 @@ function createApp() {
     if (contextWindow !== undefined) patch.contextWindow = Number(contextWindow)
     if (presetId !== undefined) patch.presetId = presetId
     if (theme !== undefined) patch.theme = theme
+    if (provider !== undefined) patch.provider = provider
+    if (roleModels !== undefined) patch.roleModels = roleModels
+    if (fallbackModels !== undefined) patch.fallbackModels = fallbackModels
     saveSettings(patch)
     res.json(publicSettings())
   })
@@ -105,11 +108,12 @@ function createApp() {
     try {
       // 允许前端把**表单里当前填的值**传进来测，不必先写盘 ——
       // 否则「测试连接」会有副作用（测完直接关掉弹窗，改动其实已经生效了）。
-      const { baseUrl, apiKey, model } = req.body || {}
+      const { baseUrl, apiKey, model, provider } = req.body || {}
       const override = {}
       if (typeof baseUrl === 'string') override.baseUrl = baseUrl
       if (typeof apiKey === 'string') override.apiKey = apiKey
       if (typeof model === 'string') override.model = model
+      if (typeof provider === 'string') override.provider = provider
       if (!override.baseUrl && !override.apiKey && !override.model && !llm.isConfigured()) {
         return res.json({ ok: false, message: '未填写 Base URL / API Key / 模型名称' })
       }

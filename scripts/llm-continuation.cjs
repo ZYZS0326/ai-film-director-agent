@@ -114,7 +114,7 @@ function check(name, ok, extra = '') {
   }
 
   console.log('\n[5] 结构化解析（验证拼出来的正文结构没坏）…')
-  check('分镜 shots 已解析', Array.isArray(session.shots) && session.shots.length === 3,
+  check('分镜 shots 完整覆盖目标时长', Array.isArray(session.shots) && session.shots.length > 3 && Math.abs(session.shots.at(-1).end - session.constraints.duration) < 0.05,
     `实际 ${session.shots ? session.shots.length : 0}`)
   check('提示词数据已解析', !!session.promptData && Array.isArray(session.promptData.shots),
     session.promptData ? `shots=${session.promptData.shots.length}` : 'null')
@@ -134,7 +134,7 @@ function check(name, ok, extra = '') {
     ev2.filter((e) => e.type === 'error').map((e) => String(e.data.message).slice(0, 80)).join(' | '))
   const shortKeys = Object.keys(session.outputs).filter((k) => String(s2.outputs[k] || '').trim().length < 200)
   check('小窗口下所有产出仍有实质内容', shortKeys.length === 0, `过短：${shortKeys.join(',')}`)
-  check('小窗口下分镜仍可解析', Array.isArray(s2.shots) && s2.shots.length === 3,
+  check('小窗口下分镜仍完整', Array.isArray(s2.shots) && s2.shots.length > 3 && Math.abs(s2.shots.at(-1).end - s2.constraints.duration) < 0.05,
     `实际 ${s2.shots ? s2.shots.length : 0}`)
 
   // ── [4] 截断提示的措辞 ──────────────────────────────────

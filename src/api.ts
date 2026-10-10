@@ -16,7 +16,7 @@ export const api = {
   getSettings: () => j<Settings>('/api/settings'),
   saveSettings: (patch: Record<string, unknown>) =>
     j<Settings>('/api/settings', { method: 'POST', body: JSON.stringify(patch) }),
-  testSettings: (override?: { baseUrl?: string; apiKey?: string; model?: string }) =>
+  testSettings: (override?: { baseUrl?: string; apiKey?: string; model?: string; provider?: string }) =>
     j<{ ok: boolean; message: string; sample?: string }>('/api/settings/test', {
       method: 'POST',
       body: JSON.stringify(override || {}),
